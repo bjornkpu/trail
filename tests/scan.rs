@@ -38,8 +38,25 @@ impl Env {
             .env("GIT_AUTHOR_EMAIL", "bk@example.com")
             .env("GIT_COMMITTER_NAME", "BK")
             .env("GIT_COMMITTER_EMAIL", "bk@example.com")
-            .env("TRAIL_HOME", self.root.join("trail"));
+            .env("TRAIL_HOME", self.root.join("trail"))
+            .env("CLAUDE_CONFIG_DIR", self.root.join("claude"));
         cmd
+    }
+
+    /// Writes a Claude Code session file whose cwd is the test repo.
+    fn session_file(&self, lines: &[serde_json::Value]) -> PathBuf {
+        let dir = self.root.join("claude/projects/C--test-app");
+        fs::create_dir_all(dir.join("s1/subagents")).unwrap();
+        // A subagent transcript must never be read.
+        fs::write(
+            dir.join("s1/subagents/agent-a.jsonl"),
+            user_line("sub", "agent prompt", &self.repo()).to_string(),
+        )
+        .unwrap();
+        let path = dir.join("s1.jsonl");
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        fs::write(&path, text.join("\n") + "\n").unwrap();
+        path
     }
 
     fn git(&self, args: &[&str]) -> String {
@@ -89,6 +106,15 @@ fn count(db: &rusqlite::Connection, table: &str) -> i64 {
         .unwrap()
 }
 
+fn user_line(uuid: &str, text: &str, cwd: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "type": "user", "uuid": uuid, "timestamp": jiff::Timestamp::now().to_string(),
+        "cwd": cwd.display().to_string(), "gitBranch": "main", "sessionId": "s1",
+        "version": "2.1.282", "origin": {"kind": "human"}, "promptSource": "typed",
+        "message": {"role": "user", "content": text}
+    })
+}
+
 fn stored(db: &rusqlite::Connection, hash: &str) -> bool {
     db.query_row(
         "SELECT count(*) FROM commits WHERE hash = ?1",
@@ -124,7 +150,10 @@ fn scan_keeps_every_local_commit() {
     env.git(&["branch", "-q", "-D", "feat"]);
 
     let out = env.trail(&["scan"]);
-    assert_eq!(out.trim(), "1 repos, 9 new commits");
+    assert_eq!(
+        out.trim(),
+        "1 repos, 9 new commits, 0 sessions, 0 new prompts"
+    );
     let db = env.db();
     for hash in &hashes {
         assert!(stored(&db, hash), "{hash} not stored");
@@ -132,7 +161,10 @@ fn scan_keeps_every_local_commit() {
     let (commits, entries) = (count(&db, "commits"), count(&db, "reflog_entries"));
     assert_eq!(commits, 9);
 
-    assert_eq!(env.trail(&["scan"]).trim(), "1 repos, 0 new commits");
+    assert_eq!(
+        env.trail(&["scan"]).trim(),
+        "1 repos, 0 new commits, 0 sessions, 0 new prompts"
+    );
     assert_eq!(env.trail(&["scan", "--quiet"]), "");
     assert_eq!(count(&db, "commits"), commits);
     assert_eq!(count(&db, "reflog_entries"), entries);
@@ -196,7 +228,10 @@ fn backfill_recovers_commits_the_reflog_lost() {
     env.git(&["commit", "-qm", "alt", "--author=BK <alt@example.com>"]);
     // Reflog expired: scan alone finds nothing.
     fs::remove_dir_all(env.repo().join(".git/logs")).unwrap();
-    assert_eq!(env.trail(&["scan"]).trim(), "1 repos, 0 new commits");
+    assert_eq!(
+        env.trail(&["scan"]).trim(),
+        "1 repos, 0 new commits, 0 sessions, 0 new prompts"
+    );
 
     let args = [
         "backfill",
@@ -213,4 +248,48 @@ fn backfill_recovers_commits_the_reflog_lost() {
         "{today}"
     );
     assert!(!today.contains("theirs"), "{today}");
+}
+
+#[test]
+fn scan_records_claude_sessions() {
+    let env = Env::new("claude");
+    env.git(&["init", "-q", "-b", "main"]);
+    env.commit("one");
+    let file = env.session_file(&[
+        user_line("u1", "hello trail", &env.repo()),
+        serde_json::json!({"type": "ai-title", "aiTitle": "Test session", "sessionId": "s1"}),
+    ]);
+
+    assert_eq!(
+        env.trail(&["scan"]).trim(),
+        "1 repos, 1 new commits, 1 sessions, 1 new prompts"
+    );
+    let db = env.db();
+    assert_eq!(count(&db, "sessions"), 1);
+    assert_eq!(count(&db, "prompts"), 1);
+    assert_eq!(
+        env.trail(&["scan"]).trim(),
+        "1 repos, 0 new commits, 0 sessions, 0 new prompts"
+    );
+
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str(&user_line("u2", "second prompt", &env.repo()).to_string());
+    text.push('\n');
+    fs::write(&file, text).unwrap();
+    assert_eq!(
+        env.trail(&["scan"]).trim(),
+        "1 repos, 0 new commits, 1 sessions, 1 new prompts"
+    );
+    assert_eq!(count(&db, "prompts"), 2);
+}
+
+#[test]
+fn scan_without_claude_dir_is_fine() {
+    let env = Env::new("noclaude");
+    env.git(&["init", "-q", "-b", "main"]);
+    env.commit("one");
+    assert_eq!(
+        env.trail(&["scan"]).trim(),
+        "1 repos, 1 new commits, 0 sessions, 0 new prompts"
+    );
 }

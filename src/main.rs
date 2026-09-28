@@ -97,12 +97,16 @@ fn main() -> anyhow::Result<()> {
 
 fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<()> {
     let config = config::load(&paths.config.join("config.toml"))?;
+    let claude = paths::claude_dir(home, |key| std::env::var_os(key).map(Into::into));
     match command {
         Command::Scan { quiet } => {
             let mut store = open_store(paths)?;
-            let (repos, commits) = scan(&mut store, &config, home)?;
+            let s = scan(&mut store, &config, home, claude.as_deref())?;
             if !*quiet {
-                println!("{repos} repos, {commits} new commits");
+                println!(
+                    "{} repos, {} new commits, {} sessions, {} new prompts",
+                    s.repos, s.commits, s.sessions, s.prompts
+                );
             }
         }
         Command::Show {
@@ -113,7 +117,7 @@ fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<
         } => {
             let mut store = open_store(paths)?;
             if !*no_scan {
-                scan(&mut store, &config, home)?;
+                scan(&mut store, &config, home, claude.as_deref())?;
             }
             let tz = TimeZone::system();
             let (from, to) = range::parse(range, Timestamp::now().to_zoned(tz.clone()).date())?;
@@ -130,7 +134,7 @@ fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<
         } => {
             let mut store = open_store(paths)?;
             if !*no_scan {
-                scan(&mut store, &config, home)?;
+                scan(&mut store, &config, home, claude.as_deref())?;
             }
             let tz = TimeZone::system();
             let since = since
@@ -230,19 +234,79 @@ fn discover_repos(config: &Config, home: Option<&Path>) -> Vec<Repo> {
     discover::discover(&roots, config.max_depth, &config.skip)
 }
 
-/// Scans every repo under the configured roots. Returns (repos seen, new commits).
+/// What one scan found.
+struct Scanned {
+    repos: usize,
+    commits: usize,
+    /// Session files read because they changed since the last scan.
+    sessions: usize,
+    prompts: usize,
+}
+
+/// Scans every repo under the configured roots, then Claude Code's session files.
 fn scan(
     store: &mut Store,
     config: &Config,
     home: Option<&Path>,
-) -> Result<(usize, usize), AppError> {
+    claude: Option<&Path>,
+) -> Result<Scanned, AppError> {
     let repos = discover_repos(config, home);
-    let mut new = 0usize;
+    let mut commits = 0usize;
     for repo in &repos {
-        new = new.saturating_add(scan_repo(store, repo)?);
+        commits = commits.saturating_add(scan_repo(store, repo)?);
     }
-    tracing::info!(repos = repos.len(), new, "scan done");
-    Ok((repos.len(), new))
+    let (sessions, prompts) = match claude {
+        Some(dir) => scan_sessions(store, dir)?,
+        None => (0, 0),
+    };
+    tracing::info!(repos = repos.len(), commits, sessions, prompts, "scan done");
+    Ok(Scanned {
+        repos: repos.len(),
+        commits,
+        sessions,
+        prompts,
+    })
+}
+
+/// Reads each changed `projects/*/*.jsonl` under `claude`. Subagent transcripts sit one
+/// level deeper and are never reached. A missing directory means no sessions. Returns
+/// (files read, new prompts).
+fn scan_sessions(store: &mut Store, claude: &Path) -> Result<(usize, usize), AppError> {
+    let Ok(projects) = fs::read_dir(claude.join("projects")) else {
+        return Ok((0, 0));
+    };
+    let known = store.session_states()?;
+    let files = projects
+        .flatten()
+        .filter_map(|project| fs::read_dir(project.path()).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"));
+    let (mut read, mut prompts) = (0usize, 0usize);
+    // ponytail: re-reads a changed file whole; store a byte offset if scans get slow.
+    for file in files {
+        let key = file.display().to_string();
+        let state = match log_state(&file, &key) {
+            Ok(state) if known.contains(&state) => continue,
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(file = %key, "cannot stat session: {e}");
+                continue;
+            }
+        };
+        let bytes = match fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(file = %key, "cannot read session: {e}");
+                continue;
+            }
+        };
+        let parsed = claude::parse(&String::from_utf8_lossy(&bytes));
+        prompts = prompts.saturating_add(store.record_session(&parsed, &state)?);
+        read = read.saturating_add(1);
+    }
+    Ok((read, prompts))
 }
 
 /// One repo, one transaction. Git and file problems are logged and skipped; database

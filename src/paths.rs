@@ -39,6 +39,13 @@ pub fn resolve(
     })
 }
 
+/// Claude Code's config directory: `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub fn claude_dir(home: Option<&Path>, var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    var("CLAUDE_CONFIG_DIR")
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".claude")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +137,32 @@ mod tests {
     #[test]
     fn no_home_and_no_vars_is_an_error() {
         assert!(matches!(resolve(None, env(&[])), Err(AppError::NoHome)));
+    }
+
+    #[test]
+    fn claude_dir_defaults_under_home() {
+        let home = abs("/home/bk");
+        assert_eq!(
+            claude_dir(Some(&home), env(&[])),
+            Some(home.join(".claude"))
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_overrides_home() {
+        let c = abs("/c");
+        let vars = [("CLAUDE_CONFIG_DIR", c.to_str().unwrap())];
+        assert_eq!(claude_dir(Some(&abs("/home/bk")), env(&vars)), Some(c));
+    }
+
+    #[test]
+    fn empty_claude_config_dir_is_ignored() {
+        let home = abs("/home/bk");
+        let vars = [("CLAUDE_CONFIG_DIR", "")];
+        assert_eq!(
+            claude_dir(Some(&home), env(&vars)),
+            Some(home.join(".claude"))
+        );
+        assert_eq!(claude_dir(None, env(&[])), None);
     }
 }
