@@ -1,8 +1,8 @@
 # trail
 
-Rust CLI that records every local commit by scanning git reflogs into SQLite. User-facing
-behaviour and the reasoning behind it live in `README.md`. Work is tracked in beads (`bd ready`),
-not in docs.
+Rust CLI that records every local commit by scanning git reflogs, and every Claude Code prompt
+from session transcripts, into SQLite. User-facing behaviour and the reasoning behind it live in
+`README.md`. Work is tracked in beads (`bd ready`), not in docs.
 
 ## Commands
 
@@ -51,6 +51,7 @@ src/
   config.rs    optional config.toml, defaults when absent
   discover.rs  walk roots -> repos (git dirs + worktrees)            [IO]
   reflog.rs    parse reflog line, commit-op filter                   [pure]
+  claude.rs    session JSONL -> session + prompts, cwd -> repo link  [pure]
   git.rs       git show --numstat for unseen hashes                  [IO]
   store.rs     rusqlite schema, inserts, queries, FTS5               [IO]
   view.rs      rebase dedupe, grouping, text and JSON rendering      [pure]
@@ -72,6 +73,17 @@ src/
   entries whose message starts with `Merge made by`. Everything else is dropped. Tests pin this
   with real reflog lines.
 
+### Claude sessions
+
+- `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/*/*.jsonl`, one file per session. Subagent files
+  one level deeper are never read. The format is internal: parse `serde_json::Value`, skip
+  what does not fit.
+- Kept: `user` lines with `origin.kind == "human"` and string content (typed), and `user` lines
+  whose `toolUseResult.answers` is an object (AskUserQuestion answers). Title from the last
+  `ai-title`, cost from the last `cost-state`.
+- Same size+mtime skip as reflogs, in `session_state`. Sessions are linked to repos at query
+  time, never stored.
+
 ### Storage
 
 SQLite, WAL, busy timeout (scheduled scan and interactive commands overlap). Append-only: never
@@ -85,6 +97,11 @@ commits        (repo_id, hash, author_name, author_email, author_date, committer
                 subject, body, source, PK (repo_id, hash))
 commit_files   (repo_id, hash, path, insertions, deletions)
 commits_fts    FTS5 (subject, body, paths), synced by triggers
+sessions       (id PK, cwd, git_branch, title, started, ended, model, cost_usd,
+                lines_added, lines_removed, cc_version)
+prompts        (uuid PK, session_id, ts, kind, text)
+session_state  (path PK, size, mtime)
+prompts_fts    FTS5 (text), synced by trigger
 ```
 
 Scan is one transaction per repo. Per-repo failures (missing object, git not on PATH) log a
@@ -100,4 +117,4 @@ warning and continue; the reflog entry is still stored. Database failures are fa
 2. `insta` snapshots of text output. Never accept a snapshot you haven't read.
 3. One integration test with `TRAIL_HOME` in a temp dir and real `git`: commit, amend, branch,
    rebase, squash merge, delete branch. Every squashed-away commit must be stored, and a second
-   scan adds nothing.
+   scan adds nothing. A second integration test covers Claude sessions via CLAUDE_CONFIG_DIR.

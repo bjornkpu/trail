@@ -1,8 +1,8 @@
 # trail
 
 A local record of every commit you make on your machine, including the local commits that squash
-merging erases from remote history. Look back on them by day, search them, or pipe them into an
-LLM.
+merging erases from remote history, and of every prompt you give Claude Code. Look back on them by
+day, search them, or pipe them into an LLM.
 
 ```
 trail show week
@@ -29,6 +29,18 @@ configured roots are not seen.
 Commits older than a repo's reflog (expired entries, a fresh clone) can be added once with
 `trail backfill --author <email>`, repeated for each address you commit with. It reads `git log
 --all`, so it only finds commits still reachable from a ref.
+
+## Why Claude Code sessions
+
+Most work now starts as a prompt. Claude Code keeps each session as a JSONL file under
+`~/.claude/projects` (or `CLAUDE_CONFIG_DIR`) and deletes it after `cleanupPeriodDays`, 30 days
+by default. trail copies what you wrote before that happens: your typed prompts, your answers
+to Claude's multiple-choice questions, and each session's title, working directory, branch,
+start and end, model and cost. Claude's own replies, tool output and subagent transcripts are
+not stored. Sessions are shown under the repo their working directory is in.
+
+To keep the transcripts themselves longer, set `"cleanupPeriodDays": 365` in
+`~/.claude/settings.json`.
 
 ## Install
 
@@ -62,7 +74,7 @@ minutes, headless). On other systems it prints a crontab line. `trail uninstall`
 
 ```
 trail scan [--quiet]
-trail show [RANGE] [--repo X] [--json] [--no-scan]
+trail show [RANGE] [--repo X] [--prompts] [--json] [--no-scan]
 trail search <QUERY> [--repo X] [--since DATE] [--json] [--no-scan]
 trail repos
 trail backfill --author EMAIL [--author EMAIL...]
@@ -71,6 +83,8 @@ trail backfill --author EMAIL [--author EMAIL...]
 `RANGE` is `today` (default), `yesterday`, `week`, `last-week`, `2026-09-25`, `2026-W39` or
 `2026-09-01..2026-09-25`. Weeks are ISO weeks, Monday to Sunday. `show` and `search` scan first
 unless `--no-scan`.
+
+`--prompts` lists each Claude session's prompts under it; `search` always lists the matching ones.
 
 Commits are placed on the day of their author date. A rebased or amended commit keeps its author
 date, so it shows once, as its newest version. All versions stay stored.
