@@ -4,6 +4,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::claude::{Kind, Parsed, Prompt, Session};
 use crate::error::AppError;
 
 const SCHEMA: &str = "
@@ -59,6 +60,36 @@ CREATE TRIGGER IF NOT EXISTS commit_files_fts_insert AFTER INSERT ON commit_file
     UPDATE commits_fts SET paths = paths || ' ' || new.path
     WHERE rowid = (SELECT rowid FROM commits WHERE repo_id = new.repo_id AND hash = new.hash);
 END;
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    git_branch TEXT NOT NULL,
+    title TEXT,
+    started TEXT NOT NULL,
+    ended TEXT NOT NULL,
+    model TEXT,
+    cost_usd REAL,
+    lines_added INTEGER,
+    lines_removed INTEGER,
+    cc_version TEXT
+);
+CREATE TABLE IF NOT EXISTS prompts (
+    uuid TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS prompts_session ON prompts (session_id, ts);
+CREATE TABLE IF NOT EXISTS session_state (
+    path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    mtime INTEGER NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5 (text);
+CREATE TRIGGER IF NOT EXISTS prompts_fts_insert AFTER INSERT ON prompts BEGIN
+    INSERT INTO prompts_fts (rowid, text) VALUES (new.rowid, new.text);
+END;
 ";
 
 pub struct Store {
@@ -113,6 +144,13 @@ pub struct Row {
     /// How the commit got here: `reflog` (made in this clone) or `backfill`.
     pub source: String,
     pub commit: Commit,
+}
+
+/// A stored session with the prompts a query asked for.
+#[derive(Debug)]
+pub struct SessionRow {
+    pub session: Session,
+    pub prompts: Vec<Prompt>,
 }
 
 /// UTC ISO 8601 with second precision, so stored dates sort as text.
@@ -392,11 +430,172 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    /// Size and mtime of every session file when it was last scanned.
+    pub fn session_states(&self) -> Result<Vec<LogState>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, size, mtime FROM session_state ORDER BY path")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(LogState {
+                path: r.get(0)?,
+                size: r.get(1)?,
+                mtime: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Stores one session file in a single transaction. The session row is upserted,
+    /// keeping stored values the new read lacks; prompts are only ever added. Returns how
+    /// many prompts were new.
+    pub fn record_session(&mut self, parsed: &Parsed, state: &LogState) -> Result<usize, AppError> {
+        let tx = self.conn.transaction()?;
+        let mut added = 0usize;
+        if let Some(s) = &parsed.session {
+            tx.execute(
+                "INSERT INTO sessions (id, cwd, git_branch, title, started, ended, model,
+                     cost_usd, lines_added, lines_removed, cc_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT (id) DO UPDATE SET
+                     title = COALESCE(excluded.title, title),
+                     started = min(started, excluded.started),
+                     ended = max(ended, excluded.ended),
+                     model = COALESCE(excluded.model, model),
+                     cost_usd = COALESCE(excluded.cost_usd, cost_usd),
+                     lines_added = COALESCE(excluded.lines_added, lines_added),
+                     lines_removed = COALESCE(excluded.lines_removed, lines_removed),
+                     cc_version = COALESCE(excluded.cc_version, cc_version)",
+                params![
+                    s.id,
+                    s.cwd,
+                    s.git_branch,
+                    s.title,
+                    iso(s.started),
+                    iso(s.ended),
+                    s.model,
+                    s.cost_usd,
+                    s.lines_added,
+                    s.lines_removed,
+                    s.cc_version,
+                ],
+            )?;
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO prompts (uuid, session_id, ts, kind, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for p in &parsed.prompts {
+                let n = stmt.execute(params![p.uuid, s.id, iso(p.ts), p.kind.as_str(), p.text])?;
+                added = added.saturating_add(n);
+            }
+        }
+        tx.execute(
+            "INSERT INTO session_state (path, size, mtime) VALUES (?1, ?2, ?3)
+             ON CONFLICT (path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime",
+            params![state.path, state.size, state.mtime],
+        )?;
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Sessions that started in `[from, to)`, oldest first, with all their prompts.
+    pub fn sessions_between(
+        &self,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Result<Vec<SessionRow>, AppError> {
+        self.sessions(
+            "WHERE started >= ?1 AND started < ?2 ORDER BY started",
+            params![iso(from), iso(to)],
+            None,
+        )
+    }
+
+    /// Sessions with a prompt holding every word of `query`, with only those prompts.
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        since: Option<Timestamp>,
+    ) -> Result<Vec<SessionRow>, AppError> {
+        let fts = fts_query(query);
+        if fts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.sessions(
+            "WHERE id IN (SELECT session_id FROM prompts WHERE rowid IN
+                          (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?1))
+             AND (?2 IS NULL OR ended >= ?2)
+             ORDER BY started",
+            params![fts, since.map(iso)],
+            Some(&fts),
+        )
+    }
+
+    /// Every known repo path, sorted.
+    pub fn repo_paths(&self) -> Result<Vec<String>, AppError> {
+        let mut stmt = self.conn.prepare("SELECT path FROM repos ORDER BY path")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Runs the session query with `tail` and loads each session's prompts, all of them or
+    /// only those matching `fts`.
+    fn sessions(
+        &self,
+        tail: &str,
+        params: impl rusqlite::Params,
+        fts: Option<&str>,
+    ) -> Result<Vec<SessionRow>, AppError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, cwd, git_branch, title, started, ended, model, cost_usd,
+                    lines_added, lines_removed, cc_version
+             FROM sessions {tail}"
+        ))?;
+        let mut prompts = self.conn.prepare(
+            "SELECT uuid, ts, kind, text FROM prompts
+             WHERE session_id = ?1
+             AND (?2 IS NULL OR rowid IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?2))
+             ORDER BY ts, uuid",
+        )?;
+        let found = stmt.query_map(params, |r| {
+            Ok(Session {
+                id: r.get(0)?,
+                cwd: r.get(1)?,
+                git_branch: r.get(2)?,
+                title: r.get(3)?,
+                started: timestamp(r, 4)?,
+                ended: timestamp(r, 5)?,
+                model: r.get(6)?,
+                cost_usd: r.get(7)?,
+                lines_added: r.get(8)?,
+                lines_removed: r.get(9)?,
+                cc_version: r.get(10)?,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for session in found {
+            let session = session?;
+            let prompts = prompts
+                .query_map(params![session.id, fts], |r| {
+                    let kind: String = r.get(2)?;
+                    Ok(Prompt {
+                        uuid: r.get(0)?,
+                        ts: timestamp(r, 1)?,
+                        kind: Kind::parse(&kind),
+                        text: r.get(3)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            rows.push(SessionRow { session, prompts });
+        }
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude::{Kind, Parsed, Prompt, Session};
     use std::path::PathBuf;
 
     fn temp_db(name: &str) -> PathBuf {
@@ -657,6 +856,158 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn session(id: &str, started: &str) -> Session {
+        Session {
+            id: id.into(),
+            cwd: r"C:\x\trail".into(),
+            git_branch: "main".into(),
+            title: Some("Title".into()),
+            started: ts(started),
+            ended: ts("2026-09-25T12:00:00Z"),
+            model: Some("claude-opus-5-5".into()),
+            cost_usd: Some(1.5),
+            lines_added: Some(3),
+            lines_removed: Some(1),
+            cc_version: Some("2.1.282".into()),
+        }
+    }
+
+    fn prompt(uuid: &str, at: &str, text: &str) -> Prompt {
+        Prompt {
+            uuid: uuid.into(),
+            ts: ts(at),
+            kind: Kind::Typed,
+            text: text.into(),
+        }
+    }
+
+    fn state(path: &str, size: i64) -> LogState {
+        LogState {
+            path: path.into(),
+            size,
+            mtime: 7,
+        }
+    }
+
+    #[test]
+    fn record_session_is_append_only_and_idempotent() {
+        let mut store = Store::open(&temp_db("sessions")).unwrap();
+        let parsed = Parsed {
+            session: Some(session("s1", "2026-09-25T10:00:00Z")),
+            prompts: vec![
+                prompt("u1", "2026-09-25T10:00:00Z", "retry policy please"),
+                Prompt {
+                    kind: Kind::Answer,
+                    ..prompt("u2", "2026-09-25T10:05:00Z", "Q: A?\nA: yes")
+                },
+            ],
+        };
+        assert_eq!(store.record_session(&parsed, &state("f1", 10)).unwrap(), 2);
+        assert_eq!(store.record_session(&parsed, &state("f1", 10)).unwrap(), 0);
+        assert_eq!(store.session_states().unwrap(), vec![state("f1", 10)]);
+
+        // A later read of a file without title or cost keeps what was stored, and an
+        // earlier start moves `started` back but a later one never moves it forward.
+        let bare = Parsed {
+            session: Some(Session {
+                title: None,
+                cost_usd: None,
+                model: None,
+                started: ts("2026-09-25T11:00:00Z"),
+                ended: ts("2026-09-25T13:00:00Z"),
+                ..session("s1", "2026-09-25T11:00:00Z")
+            }),
+            prompts: vec![prompt("u3", "2026-09-25T13:00:00Z", "more")],
+        };
+        assert_eq!(store.record_session(&bare, &state("f1", 20)).unwrap(), 1);
+        assert_eq!(store.session_states().unwrap(), vec![state("f1", 20)]);
+
+        let rows = store
+            .sessions_between(ts("2026-09-25T00:00:00Z"), ts("2026-09-26T00:00:00Z"))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = rows.first().unwrap();
+        assert_eq!(row.session.title.as_deref(), Some("Title"));
+        assert_eq!(row.session.cost_usd, Some(1.5));
+        assert_eq!(row.session.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(row.session.started, ts("2026-09-25T10:00:00Z"));
+        assert_eq!(row.session.ended, ts("2026-09-25T13:00:00Z"));
+        let uuids: Vec<_> = row.prompts.iter().map(|p| p.uuid.as_str()).collect();
+        assert_eq!(uuids, ["u1", "u2", "u3"]);
+        assert_eq!(row.prompts.get(1).unwrap().kind, Kind::Answer);
+    }
+
+    #[test]
+    fn file_without_session_only_records_its_state() {
+        let mut store = Store::open(&temp_db("nosession")).unwrap();
+        assert_eq!(
+            store
+                .record_session(&Parsed::default(), &state("empty", 0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.session_states().unwrap(), vec![state("empty", 0)]);
+    }
+
+    #[test]
+    fn sessions_between_uses_start_time() {
+        let mut store = Store::open(&temp_db("between")).unwrap();
+        for (id, start) in [
+            ("early", "2026-09-24T23:00:00Z"),
+            ("in", "2026-09-25T09:00:00Z"),
+        ] {
+            let parsed = Parsed {
+                session: Some(session(id, start)),
+                prompts: Vec::new(),
+            };
+            store.record_session(&parsed, &state(id, 1)).unwrap();
+        }
+        let rows = store
+            .sessions_between(ts("2026-09-25T00:00:00Z"), ts("2026-09-26T00:00:00Z"))
+            .unwrap();
+        let ids: Vec<_> = rows.iter().map(|r| r.session.id.as_str()).collect();
+        assert_eq!(ids, ["in"]);
+    }
+
+    #[test]
+    fn search_sessions_returns_only_matching_prompts() {
+        let mut store = Store::open(&temp_db("searchs")).unwrap();
+        let parsed = Parsed {
+            session: Some(session("s1", "2026-09-25T10:00:00Z")),
+            prompts: vec![
+                prompt("u1", "2026-09-25T10:00:00Z", "add a retry policy"),
+                prompt("u2", "2026-09-25T10:01:00Z", "unrelated"),
+            ],
+        };
+        store.record_session(&parsed, &state("f", 1)).unwrap();
+        let rows = store.search_sessions("retry", None).unwrap();
+        assert_eq!(rows.len(), 1);
+        let uuids: Vec<_> = rows
+            .first()
+            .unwrap()
+            .prompts
+            .iter()
+            .map(|p| p.uuid.as_str())
+            .collect();
+        assert_eq!(uuids, ["u1"]);
+        assert!(store.search_sessions("nothing", None).unwrap().is_empty());
+        assert!(store.search_sessions("   ", None).unwrap().is_empty());
+        assert!(
+            store
+                .search_sessions("retry", Some(ts("2026-09-26T00:00:00Z")))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn repo_paths_lists_known_repos() {
+        let store = Store::open(&temp_db("paths")).unwrap();
+        store.repo_id("C:/b").unwrap();
+        store.repo_id("C:/a").unwrap();
+        assert_eq!(store.repo_paths().unwrap(), ["C:/a", "C:/b"]);
     }
 
     #[test]
