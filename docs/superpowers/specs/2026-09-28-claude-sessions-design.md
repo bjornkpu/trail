@@ -37,7 +37,10 @@ tolerate drift.
 
 ## What is kept
 
-A **typed prompt** is a `user` line with `origin.kind == "human"` and string `message.content`.
+A **typed prompt** is a `user` line with `origin.kind == "human"`. `message.content` is usually a
+string; a pasted image turns it into an array of blocks (`{"type":"text",...}`,
+`{"type":"image",...}`), and the prompt text is then the `text` blocks joined with `\n`. A line
+whose array content holds no text block (an image-only paste) is dropped.
 Dropped: `origin.kind` of `peer` or `task-notification`, lines without `origin` (skill
 expansions, older versions), `isMeta` lines, and `tool_result` content, except answers below.
 
@@ -138,10 +141,14 @@ session unlinked; it is grouped under its raw cwd.
 
 ## Output
 
-`trail show [RANGE]`: sessions are placed on the local day they started, under their linked
-repo or raw cwd, in the same time-sorted list as commits. Branch column `claude`, subject is the
-title (or the first line of the first prompt, cut to 80 chars, when there is no title), then
-prompt count, duration (`2h05`) and cost (`$4.10`) when known.
+`trail show [RANGE]`: a session shows in a range when it started in the range or has a prompt in
+the range; only the in-range prompts are loaded for it. It is placed, for sorting and for the
+local day and `HH:MM` it shows under, at the ts of the first prompt it lists, or its start when
+it lists none, under its linked repo or raw cwd, in the same time-sorted list as commits.
+Duration and the JSON `started`/`ended` still come from the session's own start and end. Branch
+column `claude`, subject is the title (or the first line of the first listed prompt, cut to 80
+chars, when there is no title), then prompt count, duration (`2h05`) and cost (`$4.10`) when
+known.
 
 ```
 Monday 2026-09-28
@@ -154,11 +161,12 @@ Monday 2026-09-28
 prompts and `      13:20  ? <text>` for answers, with whitespace collapsed to single spaces and
 cut to 100 characters plus `…`.
 
-A session with no prompts in the range still shows when its start is in the range. An empty
-result prints `Nothing recorded.` (was `No commits.`).
+A session whose start is in the range but that lists no prompts still shows, with a zero prompt
+count. An empty result prints `Nothing recorded.` (was `No commits.`).
 
 `trail search <QUERY>`: FTS runs over prompts as well as commits. A matching prompt shows its
-session line with the matching prompts listed under it. `--since` and `--repo` apply to both.
+session line with the matching prompts listed under it. `--since` keeps only prompts at or after
+it (a session shows only when it has one), matching the commit filter; `--repo` applies to both.
 
 `--json` (both commands): one array sorted by time, each item tagged with `type`. Commit items
 are today's objects plus `"type": "commit"`. Session items:
