@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS prompts (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS prompts_session ON prompts (session_id, ts);
+CREATE INDEX IF NOT EXISTS prompts_ts ON prompts (ts);
 CREATE TABLE IF NOT EXISTS session_state (
     path TEXT PRIMARY KEY,
     size INTEGER NOT NULL,
