@@ -153,10 +153,11 @@ impl Acc {
         let Some(uuid) = str_at(v, "/uuid") else {
             return;
         };
-        let (kind, text) = if str_at(v, "/origin/kind") == Some("human")
-            && let Some(text) = str_at(v, "/message/content")
-        {
-            (Kind::Typed, text.to_owned())
+        let (kind, text) = if str_at(v, "/origin/kind") == Some("human") {
+            let Some(text) = human_text(v) else {
+                return;
+            };
+            (Kind::Typed, text)
         } else if let Some(text) = answers(v) {
             (Kind::Answer, text)
         } else {
@@ -196,6 +197,23 @@ impl Acc {
             prompts: self.prompts,
         }
     }
+}
+
+/// The typed text of a human `user` line: the string content, or, when a pasted image makes
+/// `message.content` an array of blocks, its `text` blocks joined with `\n`. `None` when
+/// there is no text at all (an image-only prompt).
+fn human_text(v: &Value) -> Option<String> {
+    if let Some(text) = str_at(v, "/message/content") {
+        return Some(text.to_owned());
+    }
+    let blocks = v.pointer("/message/content")?.as_array()?;
+    let text = blocks
+        .iter()
+        .filter(|b| str_at(b, "/type") == Some("text"))
+        .filter_map(|b| str_at(b, "/text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
 }
 
 /// `Q: ..\nA: ..[\nNotes: ..]` per question, in the order they were asked.
@@ -255,6 +273,8 @@ mod tests {
     const META: &str = r#"{"type":"user","uuid":"u5","timestamp":"2026-09-28T11:16:00.000Z","cwd":"C:\\x\\trail","sessionId":"s1","isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"skill body"}]}}"#;
     const TOOL_RESULT: &str = r#"{"type":"user","uuid":"u6","timestamp":"2026-09-28T11:17:00.000Z","cwd":"C:\\x\\trail","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"toolUseResult":{"stdout":"ok"}}"#;
     const ANSWER: &str = r#"{"type":"user","uuid":"u7","timestamp":"2026-09-28T11:20:00.000Z","cwd":"C:\\x\\trail","sessionId":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"Your questions have been answered"}]},"toolUseResult":{"questions":[{"question":"Capture?","header":"Capture","options":[],"multiSelect":false},{"question":"Subagents?","header":"Subagents","options":[],"multiSelect":false}],"answers":{"Subagents?":"Skip","Capture?":"Prompts + meta"},"annotations":{"Capture?":{"notes":"keep it small"},"Subagents?":{"preview":"ignored"}}}}"#;
+    const IMAGE: &str = r#"{"type":"user","uuid":"u8","timestamp":"2026-09-28T11:18:00.000Z","cwd":"C:\\x\\trail","sessionId":"s1","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"text","text":"check this screenshot"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}"#;
+    const IMAGE_ONLY: &str = r#"{"type":"user","uuid":"u9","timestamp":"2026-09-28T11:19:00.000Z","cwd":"C:\\x\\trail","sessionId":"s1","origin":{"kind":"human"},"message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}"#;
     const ASSISTANT: &str = r#"{"type":"assistant","uuid":"a1","timestamp":"2026-09-28T13:15:00.000Z","cwd":"C:\\x\\trail","sessionId":"s1","version":"2.1.290","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}]}}"#;
     const SYNTHETIC: &str = r#"{"type":"assistant","uuid":"a2","timestamp":"2026-09-28T12:00:00.000Z","sessionId":"s1","message":{"model":"<synthetic>","content":[]}}"#;
     const SYNTHETIC2: &str = r#"{"type":"assistant","uuid":"a3","timestamp":"2026-09-28T12:01:00.000Z","sessionId":"s1","message":{"model":"<synthetic>","content":[]}}"#;
@@ -291,6 +311,21 @@ mod tests {
                 text: "record claude sessions\nplease".into(),
             }]
         );
+    }
+
+    #[test]
+    fn typed_prompt_with_image_keeps_the_text_blocks() {
+        let parsed = parse(&file(&[IMAGE]));
+        assert_eq!(parsed.prompts.len(), 1);
+        let p = parsed.prompts.first().unwrap();
+        assert_eq!(p.kind, Kind::Typed);
+        assert_eq!(p.text, "check this screenshot");
+    }
+
+    #[test]
+    fn image_only_prompt_is_dropped() {
+        let parsed = parse(&file(&[IMAGE_ONLY]));
+        assert!(parsed.prompts.is_empty());
     }
 
     #[test]
