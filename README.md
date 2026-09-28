@@ -61,6 +61,9 @@ Both drop the binary in `~/.local/bin` and add it to your `PATH`. With a Rust to
 every platform are on the [releases page](https://github.com/bjornkpu/trail/releases). The
 crate is not on crates.io; the name `trail` is taken there.
 
+The installers also drop `trail-update` next to `trail`. Run it to upgrade to the latest release
+without the install script.
+
 Then register the scheduled scan:
 
 ```
