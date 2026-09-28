@@ -1,0 +1,52 @@
+[package]
+name = "trail"
+version = "0.1.0"
+edition = "2024"
+description = "Records every local git commit from reflogs into SQLite, including the ones squash merges erase."
+license = "MIT"
+repository = "https://github.com/bjornkpu/trail"
+homepage = "https://github.com/bjornkpu/trail"
+readme = "README.md"
+keywords = ["git", "reflog", "commits", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+jiff = "0.2.37"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+toml = "1.1.6"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = "0.3.23"
+
+[lints.clippy]
+# UM, ACTUALLY
+pedantic = { level = "deny", priority = -1 }
+# DEVELOPING LINTS
+nursery = { level = "deny", priority = -1 }
+# DENY PANICS
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"
+
+[dev-dependencies]
+insta = "1.48.0"
+
+# The profile that dist builds release binaries with.
+[profile.dist]
+inherits = "release"
+lto = "thin"
