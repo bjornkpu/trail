@@ -55,8 +55,9 @@ git tag -a v0.2.0 -m "v0.2.0" && git push --tags
 
 `dist plan` prints exactly what a release would produce, without building anything.
 
-Upgrading dist: `cargo install cargo-dist --locked`, then `dist init --yes`, which bumps
-`cargo-dist-version` and regenerates the workflow.
+Upgrading dist: newer versions are only on GitHub releases, not crates.io. Install one with
+`irm https://github.com/axodotdev/cargo-dist/releases/download/vX.Y.Z/cargo-dist-installer.ps1 | iex`
+(PowerShell 7), set `cargo-dist-version` in `dist-workspace.toml`, then run `dist generate`.
 
 ## Secrets
 
