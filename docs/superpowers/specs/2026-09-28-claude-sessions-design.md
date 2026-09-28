@@ -41,11 +41,14 @@ A **typed prompt** is a `user` line with `origin.kind == "human"` and string `me
 Dropped: `origin.kind` of `peer` or `task-notification`, lines without `origin` (skill
 expansions, older versions), `isMeta` lines, and `tool_result` content, except answers below.
 
-An **answer** is BK's reply to an `AskUserQuestion` tool call. The parser remembers each
-`AskUserQuestion` `tool_use` (`id` to its `input.questions`). When a `user` line carries a
-`tool_result` with a matching `tool_use_id`, it becomes a prompt of kind `answer`. Text is one
-block per question: `Q: <question>\nA: <answer>`, plus `\nNotes: <notes>` when the result's
-annotations hold notes. The answer prompt takes the `uuid` and `timestamp` of that `user` line.
+An **answer** is BK's reply to an `AskUserQuestion` tool call. The `user` line carrying its
+`tool_result` also has a `toolUseResult` object with `questions` (array of `{question, ...}`),
+`answers` (question text to answer text) and, on most versions, `annotations` (question text to
+`{notes?, preview?}`). Any `user` line whose `toolUseResult.answers` is an object becomes a
+prompt of kind `answer`; no pairing with the `tool_use` is needed. Text is one block per
+question in `questions` order: `Q: <question>\nA: <answer>`, plus `\nNotes: <notes>` when
+annotations hold notes; blocks are joined by a blank line. The answer prompt takes the `uuid`
+and `timestamp` of that `user` line.
 
 Assistant text, thinking and other tool calls are not stored.
 
@@ -61,7 +64,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT,                   -- last ai-title
     started TEXT NOT NULL,        -- min timestamp, UTC ISO 8601
     ended TEXT NOT NULL,          -- max timestamp
-    model TEXT,                   -- most frequent assistant message.model
+    model TEXT,                   -- most frequent assistant message.model, ignoring <synthetic>
     cost_usd REAL,                -- last cost-state
     lines_added INTEGER,
     lines_removed INTEGER,
@@ -147,10 +150,12 @@ Monday 2026-09-28
     13:10  claude  Brainstorm Claude sessions as source    6 prompts  2h05  $4.10
 ```
 
-`--prompts` lists each session's prompts under its line: `      13:12  > <first line>` for
-typed prompts and `      13:20  ? <first line>` for answers.
+`--prompts` lists each session's prompts under its line: `      13:12  > <text>` for typed
+prompts and `      13:20  ? <text>` for answers, with whitespace collapsed to single spaces and
+cut to 100 characters plus `…`.
 
-A session with no prompts in the range still shows when its start is in the range.
+A session with no prompts in the range still shows when its start is in the range. An empty
+result prints `Nothing recorded.` (was `No commits.`).
 
 `trail search <QUERY>`: FTS runs over prompts as well as commits. A matching prompt shows its
 session line with the matching prompts listed under it. `--since` and `--repo` apply to both.
