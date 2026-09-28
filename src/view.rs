@@ -52,10 +52,16 @@ pub struct Linked {
 }
 
 impl Item {
-    const fn at(&self) -> Timestamp {
+    /// Where the item sorts and which day it shows under. A session sits at the ts of the
+    /// first prompt its row lists, or its start when it lists none.
+    fn at(&self) -> Timestamp {
         match self {
             Self::Commit(r) => r.commit.author_date,
-            Self::Session(s) => s.row.session.started,
+            Self::Session(s) => s
+                .row
+                .prompts
+                .first()
+                .map_or(s.row.session.started, |p| p.ts),
         }
     }
 
@@ -161,10 +167,10 @@ pub fn text(items: &[Item], tz: &TimeZone, prompts: bool) -> String {
                     Item::Commit(r) => (r.commit.subject.clone(), stats(&r.commit.files)),
                     Item::Session(s) => (
                         s.row.session.title.clone().unwrap_or_else(|| {
-                            s.row
-                                .prompts
-                                .first()
-                                .map_or_else(|| "(untitled)".to_owned(), |p| clip(&p.text, 80))
+                            s.row.prompts.first().map_or_else(
+                                || "(untitled)".to_owned(),
+                                |p| clip(p.text.lines().next().unwrap_or(""), 80),
+                            )
                         }),
                         session_stats(&s.row),
                     ),
@@ -517,7 +523,7 @@ mod tests {
         Friday 2026-09-25
           C:/a
             09:00  main    feat: x  +10 -2
-            13:10  claude  Brainstorm  2 prompts  2h05  $4.10
+            13:12  claude  Brainstorm  2 prompts  2h05  $4.10
           C:/b
             10:00  claude  fix the thing  1 prompt  0h30
         ");
@@ -529,12 +535,50 @@ mod tests {
         Friday 2026-09-25
           C:/a
             09:00  main    feat: x  +10 -2
-            13:10  claude  Brainstorm  2 prompts  2h05  $4.10
+            13:12  claude  Brainstorm  2 prompts  2h05  $4.10
               13:12  > first line second line
               13:20  ? Q: Capture? A: Prompts
           C:/b
             10:00  claude  fix the thing  1 prompt  0h30
               10:00  > fix the thing
+        ");
+    }
+
+    #[test]
+    fn session_is_placed_by_its_first_listed_prompt() {
+        let spanning = session_row(
+            "C:/a",
+            "2026-09-24T23:00:00Z",
+            "2026-09-25T09:00:00Z",
+            None,
+            &[("2026-09-25T08:00:00Z", Kind::Typed, "only prompt in range")],
+        );
+        let items = items(Vec::new(), vec![spanning], &["C:/a".into()], None);
+        insta::assert_snapshot!(text(&items, &tz(), false), @r"
+        Friday 2026-09-25
+          C:/a
+            10:00  claude  only prompt in range  1 prompt  10h00
+        ");
+    }
+
+    #[test]
+    fn untitled_session_falls_back_to_the_first_prompt_line() {
+        let session = session_row(
+            "C:/a",
+            "2026-09-25T11:00:00Z",
+            "2026-09-25T11:05:00Z",
+            None,
+            &[(
+                "2026-09-25T11:00:00Z",
+                Kind::Typed,
+                "record claude sessions\nas a second line",
+            )],
+        );
+        let items = items(Vec::new(), vec![session], &["C:/a".into()], None);
+        insta::assert_snapshot!(text(&items, &tz(), false), @r"
+        Friday 2026-09-25
+          C:/a
+            13:00  claude  record claude sessions  1 prompt  0h05
         ");
     }
 

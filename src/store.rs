@@ -498,20 +498,27 @@ impl Store {
         Ok(added)
     }
 
-    /// Sessions that started in `[from, to)`, oldest first, with all their prompts.
+    /// Sessions that started in `[from, to)`, or that have a prompt in `[from, to)`, oldest
+    /// start first. Only prompts in `[from, to)` are loaded; a session with none still shows.
     pub fn sessions_between(
         &self,
         from: Timestamp,
         to: Timestamp,
     ) -> Result<Vec<SessionRow>, AppError> {
+        let (from, to) = (iso(from), iso(to));
         self.sessions(
-            "WHERE started >= ?1 AND started < ?2 ORDER BY started",
-            params![iso(from), iso(to)],
+            "WHERE (started >= ?1 AND started < ?2)
+                OR id IN (SELECT session_id FROM prompts WHERE ts >= ?1 AND ts < ?2)
+             ORDER BY started",
+            params![from, to],
             None,
+            Some(from.as_str()),
+            Some(to.as_str()),
         )
     }
 
-    /// Sessions with a prompt holding every word of `query`, with only those prompts.
+    /// Sessions with a prompt at or after `since` holding every word of `query`, with only
+    /// the matching prompts at or after `since`.
     pub fn search_sessions(
         &self,
         query: &str,
@@ -521,13 +528,16 @@ impl Store {
         if fts.is_empty() {
             return Ok(Vec::new());
         }
+        let since = since.map(iso);
         self.sessions(
             "WHERE id IN (SELECT session_id FROM prompts WHERE rowid IN
-                          (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?1))
-             AND (?2 IS NULL OR ended >= ?2)
+                          (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?1)
+                          AND (?2 IS NULL OR ts >= ?2))
              ORDER BY started",
-            params![fts, since.map(iso)],
+            params![fts, since],
             Some(&fts),
+            since.as_deref(),
+            None,
         )
     }
 
@@ -538,13 +548,16 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Runs the session query with `tail` and loads each session's prompts, all of them or
-    /// only those matching `fts`.
+    /// Runs the session query with `tail` and loads each session's prompts: all of them, or
+    /// only those matching `fts` and/or falling in `[prompt_from, prompt_to)` (either bound
+    /// may be absent).
     fn sessions(
         &self,
         tail: &str,
         params: impl rusqlite::Params,
         fts: Option<&str>,
+        prompt_from: Option<&str>,
+        prompt_to: Option<&str>,
     ) -> Result<Vec<SessionRow>, AppError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT id, cwd, git_branch, title, started, ended, model, cost_usd,
@@ -555,6 +568,8 @@ impl Store {
             "SELECT uuid, ts, kind, text FROM prompts
              WHERE session_id = ?1
              AND (?2 IS NULL OR rowid IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?2))
+             AND (?3 IS NULL OR ts >= ?3)
+             AND (?4 IS NULL OR ts < ?4)
              ORDER BY ts, uuid",
         )?;
         let found = stmt.query_map(params, |r| {
@@ -576,7 +591,7 @@ impl Store {
         for session in found {
             let session = session?;
             let prompts = prompts
-                .query_map(params![session.id, fts], |r| {
+                .query_map(params![session.id, fts, prompt_from, prompt_to], |r| {
                     let kind: String = r.get(2)?;
                     Ok(Prompt {
                         uuid: r.get(0)?,
@@ -969,6 +984,73 @@ mod tests {
             .unwrap();
         let ids: Vec<_> = rows.iter().map(|r| r.session.id.as_str()).collect();
         assert_eq!(ids, ["in"]);
+    }
+
+    #[test]
+    fn sessions_between_includes_sessions_with_prompts_in_range() {
+        let mut store = Store::open(&temp_db("spanning")).unwrap();
+        let parsed = Parsed {
+            session: Some(Session {
+                ended: ts("2026-09-25T09:00:00Z"),
+                ..session("s1", "2026-09-24T23:00:00Z")
+            }),
+            prompts: vec![
+                prompt("u1", "2026-09-24T23:30:00Z", "day one"),
+                prompt("u2", "2026-09-25T08:00:00Z", "day two"),
+            ],
+        };
+        store.record_session(&parsed, &state("f", 1)).unwrap();
+
+        let day1 = store
+            .sessions_between(ts("2026-09-24T00:00:00Z"), ts("2026-09-25T00:00:00Z"))
+            .unwrap();
+        assert_eq!(day1.len(), 1);
+        let uuids: Vec<_> = day1[0].prompts.iter().map(|p| p.uuid.as_str()).collect();
+        assert_eq!(uuids, ["u1"]);
+
+        let day2 = store
+            .sessions_between(ts("2026-09-25T00:00:00Z"), ts("2026-09-26T00:00:00Z"))
+            .unwrap();
+        assert_eq!(day2.len(), 1);
+        let uuids: Vec<_> = day2[0].prompts.iter().map(|p| p.uuid.as_str()).collect();
+        assert_eq!(uuids, ["u2"]);
+    }
+
+    #[test]
+    fn sessions_between_keeps_a_session_whose_prompts_are_all_out_of_range() {
+        let mut store = Store::open(&temp_db("outofrange")).unwrap();
+        let parsed = Parsed {
+            session: Some(session("s1", "2026-09-25T10:00:00Z")),
+            prompts: vec![prompt("u1", "2026-09-26T00:30:00Z", "next day")],
+        };
+        store.record_session(&parsed, &state("f", 1)).unwrap();
+        let rows = store
+            .sessions_between(ts("2026-09-25T00:00:00Z"), ts("2026-09-26T00:00:00Z"))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].prompts.is_empty());
+    }
+
+    #[test]
+    fn search_sessions_filters_prompts_by_since_within_a_session() {
+        let mut store = Store::open(&temp_db("searchsince")).unwrap();
+        let parsed = Parsed {
+            session: Some(Session {
+                ended: ts("2026-09-27T00:00:00Z"),
+                ..session("s1", "2026-09-25T10:00:00Z")
+            }),
+            prompts: vec![
+                prompt("u1", "2026-09-25T10:00:00Z", "retry policy early"),
+                prompt("u2", "2026-09-26T10:00:00Z", "retry policy late"),
+            ],
+        };
+        store.record_session(&parsed, &state("f", 1)).unwrap();
+        let rows = store
+            .search_sessions("retry", Some(ts("2026-09-26T00:00:00Z")))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let uuids: Vec<_> = rows[0].prompts.iter().map(|p| p.uuid.as_str()).collect();
+        assert_eq!(uuids, ["u2"]);
     }
 
     #[test]
