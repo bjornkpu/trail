@@ -184,7 +184,7 @@ fn scan_keeps_every_local_commit() {
     assert_eq!(json.as_array().unwrap().len(), 7);
     assert!(
         env.trail(&["show", "today", "--repo", "nope", "--no-scan"])
-            .contains("No commits.")
+            .contains("Nothing recorded.")
     );
 
     let found = env.trail(&["search", "squash", "--no-scan"]);
@@ -281,6 +281,21 @@ fn scan_records_claude_sessions() {
         "1 repos, 0 new commits, 1 sessions, 1 new prompts"
     );
     assert_eq!(count(&db, "prompts"), 2);
+
+    let today = env.trail(&["show", "--prompts", "--no-scan"]);
+    assert!(today.contains("claude  Test session  2 prompts"), "{today}");
+    assert!(today.contains("> hello trail"), "{today}");
+    let json: serde_json::Value =
+        serde_json::from_str(&env.trail(&["show", "--json", "--no-scan"])).unwrap();
+    let items = json.as_array().unwrap();
+    assert_eq!(items.len(), 2, "{json}");
+    let session = items.iter().find(|i| i["type"] == "session").unwrap();
+    assert!(session["repo"].as_str().unwrap().ends_with("app"), "{json}");
+    assert_eq!(session["prompts"].as_array().unwrap().len(), 2);
+    assert!(items.iter().any(|i| i["type"] == "commit"));
+    let found = env.trail(&["search", "second", "--no-scan"]);
+    assert!(found.contains("> second prompt"), "{found}");
+    assert!(!found.contains("hello trail"), "{found}");
 }
 
 #[test]

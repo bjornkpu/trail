@@ -5,7 +5,8 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::store::{FileStat, RepoSummary, Row};
+use crate::claude::{self, Kind};
+use crate::store::{FileStat, RepoSummary, Row, SessionRow};
 
 /// Shows each piece of work once. Rows with the same author date, author email and subject
 /// are versions of one commit: rebased, amended, or the same commit in another clone of the
@@ -36,44 +37,149 @@ pub fn dedupe(rows: Vec<Row>) -> Vec<Row> {
     out
 }
 
-/// Day > repo > `HH:MM  branch  subject  +N -M`, in `tz`, by author date.
-#[must_use]
-pub fn text(rows: &[Row], tz: &TimeZone) -> String {
-    if rows.is_empty() {
-        return "No commits.\n".into();
+/// One line of the timeline.
+#[derive(Debug)]
+pub enum Item {
+    Commit(Row),
+    Session(Linked),
+}
+
+/// A session with the repo its cwd lies in, if trail knows one.
+#[derive(Debug)]
+pub struct Linked {
+    pub repo: Option<String>,
+    pub row: SessionRow,
+}
+
+impl Item {
+    const fn at(&self) -> Timestamp {
+        match self {
+            Self::Commit(r) => r.commit.author_date,
+            Self::Session(s) => s.row.session.started,
+        }
     }
-    let mut days: BTreeMap<Date, BTreeMap<&str, Vec<&Row>>> = BTreeMap::new();
-    for row in rows {
-        let day = row.commit.author_date.to_zoned(tz.clone()).date();
+
+    /// The repo heading it is listed under.
+    fn group(&self) -> &str {
+        match self {
+            Self::Commit(r) => &r.repo,
+            Self::Session(s) => s.repo.as_deref().unwrap_or(&s.row.session.cwd),
+        }
+    }
+
+    fn branch(&self) -> &str {
+        match self {
+            Self::Commit(r) => &r.branch,
+            Self::Session(_) => "claude",
+        }
+    }
+}
+
+/// Commits and sessions in one list by time. Sessions are linked to the longest enclosing
+/// repo in `repos`; `filter` keeps sessions whose linked repo, or cwd when unlinked,
+/// contains it (commits are already filtered by the query).
+#[must_use]
+pub fn items(
+    commits: Vec<Row>,
+    sessions: Vec<SessionRow>,
+    repos: &[String],
+    filter: Option<&str>,
+) -> Vec<Item> {
+    let filter = filter.map(str::to_lowercase);
+    let mut items: Vec<Item> = commits.into_iter().map(Item::Commit).collect();
+    items.extend(sessions.into_iter().filter_map(|row| {
+        let repo = claude::link(&row.session.cwd, repos).map(str::to_owned);
+        let key = repo.as_deref().unwrap_or(&row.session.cwd).to_lowercase();
+        filter
+            .as_ref()
+            .is_none_or(|f| key.contains(f.as_str()))
+            .then_some(Item::Session(Linked { repo, row }))
+    }));
+    items.sort_by_key(Item::at);
+    items
+}
+
+/// Whitespace collapsed to single spaces, cut to `max` characters plus `…`.
+fn clip(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        flat.chars().take(max).chain(std::iter::once('…')).collect()
+    }
+}
+
+/// `  N prompts  2h05  $4.10`; cost only when known.
+fn session_stats(s: &SessionRow) -> String {
+    let n = s.prompts.len();
+    let noun = if n == 1 { "prompt" } else { "prompts" };
+    let took = s.session.ended.duration_since(s.session.started);
+    let mut out = format!(
+        "  {n} {noun}  {}h{:02}",
+        took.as_hours(),
+        took.as_mins().rem_euclid(60)
+    );
+    if let Some(cost) = s.session.cost_usd {
+        use std::fmt::Write as _;
+        let _ = write!(out, "  ${cost:.2}");
+    }
+    out
+}
+
+/// Day > repo > `HH:MM  branch  subject  stats`, in `tz`. Sessions show as branch `claude`
+/// with their title; `prompts` lists each session's prompts under it.
+#[must_use]
+pub fn text(items: &[Item], tz: &TimeZone, prompts: bool) -> String {
+    if items.is_empty() {
+        return "Nothing recorded.\n".into();
+    }
+    let mut days: BTreeMap<Date, BTreeMap<&str, Vec<&Item>>> = BTreeMap::new();
+    for item in items {
+        let day = item.at().to_zoned(tz.clone()).date();
         days.entry(day)
             .or_default()
-            .entry(&row.repo)
+            .entry(item.group())
             .or_default()
-            .push(row);
+            .push(item);
     }
+    let hm = |ts: Timestamp| ts.to_zoned(tz.clone()).strftime("%H:%M").to_string();
     let mut lines = Vec::new();
     for (day, repos) in days {
         if !lines.is_empty() {
             lines.push(String::new());
         }
         lines.push(day.strftime("%A %Y-%m-%d").to_string());
-        for (repo, mut commits) in repos {
-            commits.sort_by_key(|r| r.commit.author_date);
-            let width = commits
+        for (repo, group) in repos {
+            let width = group
                 .iter()
-                .map(|r| r.branch.chars().count())
+                .map(|i| i.branch().chars().count())
                 .max()
                 .unwrap_or(0);
             lines.push(format!("  {repo}"));
-            for r in commits {
-                let time = r.commit.author_date.to_zoned(tz.clone());
+            for item in group {
+                let (subject, tail) = match item {
+                    Item::Commit(r) => (r.commit.subject.clone(), stats(&r.commit.files)),
+                    Item::Session(s) => (
+                        s.row.session.title.clone().unwrap_or_else(|| {
+                            s.row
+                                .prompts
+                                .first()
+                                .map_or_else(|| "(untitled)".to_owned(), |p| clip(&p.text, 80))
+                        }),
+                        session_stats(&s.row),
+                    ),
+                };
                 lines.push(format!(
-                    "    {}  {:<width$}  {}{}",
-                    time.strftime("%H:%M"),
-                    r.branch,
-                    r.commit.subject,
-                    stats(&r.commit.files)
+                    "    {}  {:<width$}  {subject}{tail}",
+                    hm(item.at()),
+                    item.branch(),
                 ));
+                if prompts && let Item::Session(s) = item {
+                    for p in &s.row.prompts {
+                        let mark = if p.kind == Kind::Answer { '?' } else { '>' };
+                        lines.push(format!("      {}  {mark} {}", hm(p.ts), clip(&p.text, 100)));
+                    }
+                }
             }
         }
     }
@@ -114,6 +220,13 @@ pub fn repos_text(repos: &[RepoSummary], tz: &TimeZone) -> String {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum JsonItem<'a> {
+    Commit(JsonCommit<'a>),
+    Session(JsonSession<'a>),
+}
+
+#[derive(Serialize)]
 struct JsonCommit<'a> {
     repo: &'a str,
     branch: &'a str,
@@ -124,26 +237,76 @@ struct JsonCommit<'a> {
     files: &'a [FileStat],
 }
 
-/// Pretty JSON array, dates in `tz` with their offset.
-pub fn json(rows: &[Row], tz: &TimeZone) -> serde_json::Result<String> {
-    let commits: Vec<_> = rows
+#[derive(Serialize)]
+struct JsonSession<'a> {
+    repo: Option<&'a str>,
+    cwd: &'a str,
+    id: &'a str,
+    title: Option<&'a str>,
+    started: String,
+    ended: String,
+    model: Option<&'a str>,
+    cost_usd: Option<f64>,
+    lines_added: Option<i64>,
+    lines_removed: Option<i64>,
+    prompts: Vec<JsonPrompt<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonPrompt<'a> {
+    ts: String,
+    kind: &'static str,
+    text: &'a str,
+}
+
+/// Pretty JSON array of tagged items by time, dates in `tz` with their offset. Prompts
+/// carry their full text.
+pub fn json(items: &[Item], tz: &TimeZone) -> serde_json::Result<String> {
+    let local = |ts: Timestamp| {
+        ts.to_zoned(tz.clone())
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string()
+    };
+    let out: Vec<_> = items
         .iter()
-        .map(|r| JsonCommit {
-            repo: &r.repo,
-            branch: &r.branch,
-            hash: &r.commit.hash,
-            date: r
-                .commit
-                .author_date
-                .to_zoned(tz.clone())
-                .strftime("%Y-%m-%dT%H:%M:%S%:z")
-                .to_string(),
-            subject: &r.commit.subject,
-            body: &r.commit.body,
-            files: &r.commit.files,
+        .map(|item| match item {
+            Item::Commit(r) => JsonItem::Commit(JsonCommit {
+                repo: &r.repo,
+                branch: &r.branch,
+                hash: &r.commit.hash,
+                date: local(r.commit.author_date),
+                subject: &r.commit.subject,
+                body: &r.commit.body,
+                files: &r.commit.files,
+            }),
+            Item::Session(s) => {
+                let session = &s.row.session;
+                JsonItem::Session(JsonSession {
+                    repo: s.repo.as_deref(),
+                    cwd: &session.cwd,
+                    id: &session.id,
+                    title: session.title.as_deref(),
+                    started: local(session.started),
+                    ended: local(session.ended),
+                    model: session.model.as_deref(),
+                    cost_usd: session.cost_usd,
+                    lines_added: session.lines_added,
+                    lines_removed: session.lines_removed,
+                    prompts: s
+                        .row
+                        .prompts
+                        .iter()
+                        .map(|p| JsonPrompt {
+                            ts: local(p.ts),
+                            kind: p.kind.as_str(),
+                            text: &p.text,
+                        })
+                        .collect(),
+                })
+            }
         })
         .collect();
-    serde_json::to_string_pretty(&commits)
+    serde_json::to_string_pretty(&out)
 }
 
 #[cfg(test)]
@@ -275,6 +438,183 @@ mod tests {
         );
     }
 
+    use crate::claude::{Kind, Prompt, Session};
+    use crate::store::SessionRow;
+
+    fn session_row(
+        cwd: &str,
+        started: &str,
+        ended: &str,
+        title: Option<&str>,
+        prompts: &[(&str, Kind, &str)],
+    ) -> SessionRow {
+        SessionRow {
+            session: Session {
+                id: format!("id-{cwd}"),
+                cwd: cwd.into(),
+                git_branch: "main".into(),
+                title: title.map(Into::into),
+                started: started.parse().unwrap(),
+                ended: ended.parse().unwrap(),
+                model: Some("claude-opus-5-5".into()),
+                cost_usd: title.map(|_| 4.1),
+                lines_added: None,
+                lines_removed: None,
+                cc_version: None,
+            },
+            prompts: prompts
+                .iter()
+                .enumerate()
+                .map(|(i, (at, kind, text))| Prompt {
+                    uuid: format!("u{i}"),
+                    ts: at.parse().unwrap(),
+                    kind: *kind,
+                    text: (*text).into(),
+                })
+                .collect(),
+        }
+    }
+
+    fn mixed() -> Vec<Item> {
+        let commit = row(
+            "C:/a",
+            "main",
+            "2026-09-25T07:00:00Z",
+            "2026-09-25T07:00:00Z",
+            "feat: x",
+        );
+        let linked = session_row(
+            "C:/a/src",
+            "2026-09-25T11:10:00Z",
+            "2026-09-25T13:15:00Z",
+            Some("Brainstorm"),
+            &[
+                (
+                    "2026-09-25T11:12:00Z",
+                    Kind::Typed,
+                    "first line\nsecond line",
+                ),
+                (
+                    "2026-09-25T11:20:00Z",
+                    Kind::Answer,
+                    "Q: Capture?\nA: Prompts",
+                ),
+            ],
+        );
+        let unlinked = session_row(
+            "C:/b",
+            "2026-09-25T08:00:00Z",
+            "2026-09-25T08:30:00Z",
+            None,
+            &[("2026-09-25T08:00:00Z", Kind::Typed, "fix the thing")],
+        );
+        items(vec![commit], vec![linked, unlinked], &["C:/a".into()], None)
+    }
+
+    #[test]
+    fn text_interleaves_sessions_with_commits() {
+        insta::assert_snapshot!(text(&mixed(), &tz(), false), @r"
+        Friday 2026-09-25
+          C:/a
+            09:00  main    feat: x  +10 -2
+            13:10  claude  Brainstorm  2 prompts  2h05  $4.10
+          C:/b
+            10:00  claude  fix the thing  1 prompt  0h30
+        ");
+    }
+
+    #[test]
+    fn text_lists_prompts_on_request() {
+        insta::assert_snapshot!(text(&mixed(), &tz(), true), @r"
+        Friday 2026-09-25
+          C:/a
+            09:00  main    feat: x  +10 -2
+            13:10  claude  Brainstorm  2 prompts  2h05  $4.10
+              13:12  > first line second line
+              13:20  ? Q: Capture? A: Prompts
+          C:/b
+            10:00  claude  fix the thing  1 prompt  0h30
+              10:00  > fix the thing
+        ");
+    }
+
+    #[test]
+    fn long_prompts_are_clipped() {
+        let long = "word ".repeat(40);
+        assert_eq!(clip(&long, 10), "word word …");
+        assert_eq!(clip("short", 10), "short");
+    }
+
+    #[test]
+    fn repo_filter_applies_to_the_link_or_the_cwd() {
+        let sessions = || {
+            vec![
+                session_row(
+                    "C:/a/src",
+                    "2026-09-25T11:00:00Z",
+                    "2026-09-25T11:00:00Z",
+                    None,
+                    &[],
+                ),
+                session_row(
+                    "C:/b",
+                    "2026-09-25T12:00:00Z",
+                    "2026-09-25T12:00:00Z",
+                    None,
+                    &[],
+                ),
+            ]
+        };
+        let repos = ["C:/a".to_owned()];
+        assert_eq!(items(Vec::new(), sessions(), &repos, Some("A")).len(), 1);
+        assert_eq!(items(Vec::new(), sessions(), &repos, Some("c:/b")).len(), 1);
+        assert_eq!(items(Vec::new(), sessions(), &repos, Some("src")).len(), 0);
+    }
+
+    #[test]
+    fn json_tags_sessions() {
+        let only = items(
+            Vec::new(),
+            vec![session_row(
+                "C:/a/src",
+                "2026-09-25T11:10:00Z",
+                "2026-09-25T13:15:00Z",
+                Some("Brainstorm"),
+                &[(
+                    "2026-09-25T11:12:00Z",
+                    Kind::Typed,
+                    "first line\nsecond line",
+                )],
+            )],
+            &["C:/a".into()],
+            None,
+        );
+        insta::assert_snapshot!(json(&only, &tz()).unwrap(), @r#"
+        [
+          {
+            "type": "session",
+            "repo": "C:/a",
+            "cwd": "C:/a/src",
+            "id": "id-C:/a/src",
+            "title": "Brainstorm",
+            "started": "2026-09-25T13:10:00+02:00",
+            "ended": "2026-09-25T15:15:00+02:00",
+            "model": "claude-opus-5-5",
+            "cost_usd": 4.1,
+            "lines_added": null,
+            "lines_removed": null,
+            "prompts": [
+              {
+                "ts": "2026-09-25T13:12:00+02:00",
+                "kind": "typed",
+                "text": "first line\nsecond line"
+              }
+            ]
+          }
+        ]
+        "#);
+    }
+
     #[test]
     fn text_groups_by_day_then_repo() {
         let mut merge = row(
@@ -285,7 +625,7 @@ mod tests {
             "Merge branch 'x'",
         );
         merge.commit.files.clear();
-        let rows = [
+        let rows = vec![
             row(
                 "C:/b",
                 "main",
@@ -309,7 +649,7 @@ mod tests {
             ),
             merge,
         ];
-        insta::assert_snapshot!(text(&rows, &tz()), @r"
+        insta::assert_snapshot!(text(&items(rows, Vec::new(), &[], None), &tz(), false), @r"
         Friday 2026-09-25
           C:/a
             09:10  feat/long  fix: second  +10 -2
@@ -345,7 +685,7 @@ mod tests {
 
     #[test]
     fn text_without_commits() {
-        insta::assert_snapshot!(text(&[], &tz()), @"No commits.");
+        insta::assert_snapshot!(text(&[], &tz(), false), @"Nothing recorded.");
     }
 
     #[test]
@@ -358,9 +698,11 @@ mod tests {
             "feat: x",
         );
         r.commit.body = "Why.".into();
-        insta::assert_snapshot!(json(&[r], &tz()).unwrap(), @r#"
+        let only = items(vec![r], Vec::new(), &[], None);
+        insta::assert_snapshot!(json(&only, &tz()).unwrap(), @r#"
         [
           {
+            "type": "commit",
             "repo": "C:/a",
             "branch": "main",
             "hash": "0000000000000000000000000000000000000007",

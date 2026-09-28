@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::discover::Repo;
 use crate::error::AppError;
 use crate::paths::Paths;
-use crate::store::{LogState, Row, Store};
+use crate::store::{LogState, Store};
 
 /// A local record of every commit you make on this machine.
 #[derive(Parser)]
@@ -40,7 +40,7 @@ enum Command {
         #[arg(long)]
         quiet: bool,
     },
-    /// Show commits in a date range.
+    /// Show commits and Claude sessions in a date range.
     Show {
         /// today, yesterday, week, last-week, 2026-09-25, 2026-W39 or FROM..TO.
         #[arg(default_value = "today")]
@@ -53,8 +53,11 @@ enum Command {
         /// Skip the scan that runs first.
         #[arg(long)]
         no_scan: bool,
+        /// List each Claude session's prompts under it.
+        #[arg(long)]
+        prompts: bool,
     },
-    /// Full-text search over subjects, bodies and changed paths.
+    /// Full-text search over commit subjects, bodies, changed paths and Claude prompts.
     Search {
         query: String,
         /// Only commits from repos whose path contains this.
@@ -114,6 +117,7 @@ fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<
             repo,
             json,
             no_scan,
+            prompts,
         } => {
             let mut store = open_store(paths)?;
             if !*no_scan {
@@ -122,8 +126,10 @@ fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<
             let tz = TimeZone::system();
             let (from, to) = range::parse(range, Timestamp::now().to_zoned(tz.clone()).date())?;
             let (start, end) = range::span(from, to, &tz)?;
-            let rows = view::dedupe(store.commits_between(start, end, repo.as_deref())?);
-            print_rows(&rows, *json, &tz)?;
+            let commits = view::dedupe(store.commits_between(start, end, repo.as_deref())?);
+            let sessions = store.sessions_between(start, end)?;
+            let items = view::items(commits, sessions, &store.repo_paths()?, repo.as_deref());
+            print_items(&items, *json, &tz, *prompts)?;
         }
         Command::Search {
             query,
@@ -144,8 +150,10 @@ fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<
                     Ok(range::span(from, from, &tz)?.0)
                 })
                 .transpose()?;
-            let rows = view::dedupe(store.search(query, repo.as_deref(), since)?);
-            print_rows(&rows, *json, &tz)?;
+            let commits = view::dedupe(store.search(query, repo.as_deref(), since)?);
+            let sessions = store.search_sessions(query, since)?;
+            let items = view::items(commits, sessions, &store.repo_paths()?, repo.as_deref());
+            print_items(&items, *json, &tz, true)?;
         }
         Command::Repos => {
             let store = open_store(paths)?;
@@ -170,11 +178,16 @@ fn run(command: &Command, paths: &Paths, home: Option<&Path>) -> anyhow::Result<
     Ok(())
 }
 
-fn print_rows(rows: &[Row], json: bool, tz: &TimeZone) -> anyhow::Result<()> {
+fn print_items(
+    items: &[view::Item],
+    json: bool,
+    tz: &TimeZone,
+    prompts: bool,
+) -> anyhow::Result<()> {
     if json {
-        println!("{}", view::json(rows, tz)?);
+        println!("{}", view::json(items, tz)?);
     } else {
-        print!("{}", view::text(rows, tz));
+        print!("{}", view::text(items, tz, prompts));
     }
     Ok(())
 }
