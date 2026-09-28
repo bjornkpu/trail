@@ -7,21 +7,24 @@ use serde::Serialize;
 
 use crate::store::{FileStat, RepoSummary, Row};
 
-/// Drops older versions of rebased and amended commits: rows with the same repo, author
-/// date and subject collapse into the one with the newest committer date.
+/// Shows each piece of work once. Rows with the same author date, author email and subject
+/// are versions of one commit: rebased, amended, or the same commit in another clone of the
+/// repo. The newest committer date wins; on a tie, a reflog copy beats a backfilled one,
+/// since the reflog knows which clone and branch it was made on.
 #[must_use]
 pub fn dedupe(rows: Vec<Row>) -> Vec<Row> {
     let mut out: Vec<Row> = Vec::new();
-    let mut seen: HashMap<(String, Timestamp, String), usize> = HashMap::new();
+    let mut seen: HashMap<(Timestamp, String, String), usize> = HashMap::new();
+    let rank = |r: &Row| (r.commit.committer_date, r.source == "reflog");
     for row in rows {
         let key = (
-            row.repo.clone(),
             row.commit.author_date,
+            row.commit.author_email.clone(),
             row.commit.subject.clone(),
         );
         if let Some(&i) = seen.get(&key) {
             if let Some(kept) = out.get_mut(i)
-                && row.commit.committer_date > kept.commit.committer_date
+                && rank(&row) > rank(kept)
             {
                 *kept = row;
             }
@@ -152,6 +155,7 @@ mod tests {
         Row {
             repo: repo.into(),
             branch: branch.into(),
+            source: "reflog".into(),
             commit: Commit {
                 hash: format!("{:0>40}", subject.len()),
                 author_name: "BK".into(),
@@ -205,13 +209,6 @@ mod tests {
                 "feat: x",
             ),
             row(
-                "C:/b",
-                "main",
-                "2026-09-25T07:00:00Z",
-                "2026-09-25T07:00:00Z",
-                "feat: x",
-            ),
-            row(
                 "C:/a",
                 "main",
                 "2026-09-25T07:00:00Z",
@@ -219,23 +216,61 @@ mod tests {
                 "feat: y",
             ),
         ];
-        let kept = dedupe(rows);
-        let committer: Vec<_> = kept
-            .iter()
-            .map(|r| {
-                (
-                    r.repo.as_str(),
-                    r.commit.subject.as_str(),
-                    r.commit.committer_date.to_string(),
-                )
-            })
+        let kept: Vec<_> = dedupe(rows)
+            .into_iter()
+            .map(|r| (r.commit.subject, r.commit.committer_date.to_string()))
             .collect();
         assert_eq!(
-            committer,
+            kept,
             [
-                ("C:/a", "feat: x", "2026-09-25T09:00:00Z".to_owned()),
-                ("C:/b", "feat: x", "2026-09-25T07:00:00Z".to_owned()),
-                ("C:/a", "feat: y", "2026-09-25T07:00:00Z".to_owned()),
+                ("feat: x".to_owned(), "2026-09-25T09:00:00Z".to_owned()),
+                ("feat: y".to_owned(), "2026-09-25T07:00:00Z".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dedupe_across_clones_prefers_the_reflog_copy() {
+        let mut clone = row(
+            "C:/c4/kai",
+            "HEAD",
+            "2026-09-25T07:00:00Z",
+            "2026-09-25T07:00:00Z",
+            "feat: x",
+        );
+        clone.source = "backfill".into();
+        let mine = row(
+            "C:/kai",
+            "feat/x",
+            "2026-09-25T07:00:00Z",
+            "2026-09-25T07:00:00Z",
+            "feat: x",
+        );
+        let mut other_author = row(
+            "C:/c4/kai",
+            "HEAD",
+            "2026-09-25T07:00:00Z",
+            "2026-09-25T07:00:00Z",
+            "feat: x",
+        );
+        other_author.commit.author_email = "someone@example.com".into();
+        let kept: Vec<_> = dedupe(vec![clone, mine, other_author])
+            .into_iter()
+            .map(|r| (r.repo, r.branch, r.commit.author_email))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (
+                    "C:/kai".to_owned(),
+                    "feat/x".to_owned(),
+                    "bk@example.com".to_owned()
+                ),
+                (
+                    "C:/c4/kai".to_owned(),
+                    "HEAD".to_owned(),
+                    "someone@example.com".to_owned()
+                ),
             ]
         );
     }

@@ -110,6 +110,8 @@ pub struct Row {
     pub repo: String,
     /// Branch name without `refs/heads/`, or the ref when no branch log has the commit.
     pub branch: String,
+    /// How the commit got here: `reflog` (made in this clone) or `backfill`.
+    pub source: String,
     pub commit: Commit,
 }
 
@@ -298,7 +300,8 @@ impl Store {
                     c.committer_date, c.subject, c.body,
                     COALESCE((SELECT e.ref FROM reflog_entries e
                               WHERE e.repo_id = c.repo_id AND e.hash = c.hash
-                              ORDER BY e.ref NOT LIKE 'refs/heads/%', e.ts LIMIT 1), 'HEAD')
+                              ORDER BY e.ref NOT LIKE 'refs/heads/%', e.ts LIMIT 1), 'HEAD'),
+                    c.source
              FROM commits c JOIN repos r ON r.id = c.repo_id {tail}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -313,6 +316,7 @@ impl Store {
                 Row {
                     repo: r.get(0)?,
                     branch: branch.strip_prefix("refs/heads/").unwrap_or(&branch).into(),
+                    source: r.get(10)?,
                     commit: Commit {
                         hash: r.get(2)?,
                         author_name: r.get(3)?,
