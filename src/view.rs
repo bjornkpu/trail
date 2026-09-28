@@ -105,6 +105,29 @@ pub fn items(
     items
 }
 
+/// The content between a well-formed `<tag>...</tag>` pair, or `None` if the tag is missing
+/// or unclosed.
+fn tag_content<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let after_open = text.split_once(&format!("<{tag}>"))?.1;
+    after_open
+        .split_once(&format!("</{tag}>"))
+        .map(|(content, _)| content)
+}
+
+/// Slash-command prompts are stored as raw `<command-name>`/`<command-args>` XML (tags may
+/// appear in any order). This renders them as `NAME ARGS` for display, dropping empty args.
+/// Plain prompts, and malformed XML (an unclosed tag), are returned unchanged.
+#[must_use]
+fn command_display(text: &str) -> String {
+    let Some(name) = tag_content(text, "command-name") else {
+        return text.to_owned();
+    };
+    match tag_content(text, "command-args").map(str::trim) {
+        Some(args) if !args.is_empty() => format!("{name} {args}"),
+        _ => name.to_owned(),
+    }
+}
+
 /// Whitespace collapsed to single spaces, cut to `max` characters plus `…`.
 fn clip(text: &str, max: usize) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -169,7 +192,10 @@ pub fn text(items: &[Item], tz: &TimeZone, prompts: bool) -> String {
                         s.row.session.title.clone().unwrap_or_else(|| {
                             s.row.prompts.first().map_or_else(
                                 || "(untitled)".to_owned(),
-                                |p| clip(p.text.lines().next().unwrap_or(""), 80),
+                                |p| {
+                                    let display = command_display(&p.text);
+                                    clip(display.lines().next().unwrap_or(""), 80)
+                                },
                             )
                         }),
                         session_stats(&s.row),
@@ -183,7 +209,11 @@ pub fn text(items: &[Item], tz: &TimeZone, prompts: bool) -> String {
                 if prompts && let Item::Session(s) = item {
                     for p in &s.row.prompts {
                         let mark = if p.kind == Kind::Answer { '?' } else { '>' };
-                        lines.push(format!("      {}  {mark} {}", hm(p.ts), clip(&p.text, 100)));
+                        lines.push(format!(
+                            "      {}  {mark} {}",
+                            hm(p.ts),
+                            clip(&command_display(&p.text), 100)
+                        ));
                     }
                 }
             }
@@ -587,6 +617,43 @@ mod tests {
         let long = "word ".repeat(40);
         assert_eq!(clip(&long, 10), "word word …");
         assert_eq!(clip("short", 10), "short");
+    }
+
+    #[test]
+    fn command_display_shows_name_and_args() {
+        let text = "<command-message>caveman:caveman</command-message>\n\
+            <command-name>/caveman:caveman</command-name>\n\
+            <command-args>Run bd ready</command-args>";
+        assert_eq!(command_display(text), "/caveman:caveman Run bd ready");
+    }
+
+    #[test]
+    fn command_display_without_args_tag() {
+        let text = "<command-name>/caveman:caveman</command-name>";
+        assert_eq!(command_display(text), "/caveman:caveman");
+    }
+
+    #[test]
+    fn command_display_with_empty_args() {
+        let text = "<command-name>/caveman:caveman</command-name><command-args></command-args>";
+        assert_eq!(command_display(text), "/caveman:caveman");
+    }
+
+    #[test]
+    fn command_display_handles_tags_out_of_order() {
+        let text = "<command-args>Run bd ready</command-args><command-name>/caveman:caveman</command-name>";
+        assert_eq!(command_display(text), "/caveman:caveman Run bd ready");
+    }
+
+    #[test]
+    fn command_display_leaves_plain_prompt_unchanged() {
+        assert_eq!(command_display("fix the thing"), "fix the thing");
+    }
+
+    #[test]
+    fn command_display_leaves_malformed_xml_unchanged() {
+        let text = "<command-name>/caveman:caveman";
+        assert_eq!(command_display(text), text);
     }
 
     #[test]
