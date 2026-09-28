@@ -1,6 +1,6 @@
 [package]
 name = "trail"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Records every local git commit from reflogs into SQLite, including the ones squash merges erase."
 license = "MIT"
