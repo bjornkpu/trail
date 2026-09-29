@@ -4,7 +4,7 @@ use std::time::Duration;
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::claude::{Kind, Parsed, Prompt, Session};
+use crate::domain::claude::{Kind, Parsed, Prompt, Session};
 use crate::error::AppError;
 
 const SCHEMA: &str = "
@@ -611,7 +611,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude::{Kind, Parsed, Prompt, Session};
+    use crate::domain::claude::{Kind, Parsed, Prompt, Session};
     use std::path::PathBuf;
 
     fn temp_db(name: &str) -> PathBuf {

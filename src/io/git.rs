@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::store::{Commit, FileStat};
+use crate::io::store::{Commit, FileStat};
 
 /// Header fields, each NUL-terminated, then `--numstat` lines.
 const FORMAT: &str = "--format=%H%x00%an%x00%ae%x00%aI%x00%cI%x00%s%x00%b%x00";

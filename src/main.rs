@@ -1,14 +1,6 @@
-mod claude;
-mod config;
-mod discover;
+mod domain;
 mod error;
-mod git;
-mod paths;
-mod range;
-mod reflog;
-mod schedule;
-mod store;
-mod view;
+mod io;
 
 use std::fs;
 use std::path::Path;
@@ -18,11 +10,13 @@ use clap::{Parser, Subcommand};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
-use crate::config::Config;
-use crate::discover::Repo;
+use crate::domain::paths::Paths;
+use crate::domain::{claude, paths, range, reflog, view};
 use crate::error::AppError;
-use crate::paths::Paths;
-use crate::store::{LogState, Store};
+use crate::io::config::Config;
+use crate::io::discover::Repo;
+use crate::io::store::{LogState, Store};
+use crate::io::{config, discover, git, schedule, store};
 
 /// A local record of every commit you make on this machine.
 #[derive(Parser)]

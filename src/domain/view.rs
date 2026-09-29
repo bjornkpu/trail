@@ -5,8 +5,8 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::claude::{self, Kind};
-use crate::store::{FileStat, RepoSummary, Row, SessionRow};
+use crate::domain::claude::{self, Kind};
+use crate::io::store::{FileStat, RepoSummary, Row, SessionRow};
 
 /// Shows each piece of work once. Rows with the same author date, author email and subject
 /// are versions of one commit: rebased, amended, or the same commit in another clone of the
@@ -353,7 +353,7 @@ pub fn json(items: &[Item], tz: &TimeZone) -> serde_json::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Commit;
+    use crate::io::store::Commit;
 
     fn row(repo: &str, branch: &str, author: &str, committer: &str, subject: &str) -> Row {
         Row {
@@ -479,8 +479,8 @@ mod tests {
         );
     }
 
-    use crate::claude::{Kind, Prompt, Session};
-    use crate::store::SessionRow;
+    use crate::domain::claude::{Kind, Prompt, Session};
+    use crate::io::store::SessionRow;
 
     fn session_row(
         cwd: &str,

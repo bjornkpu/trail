@@ -46,22 +46,27 @@ one implementation, no config for constants. Every non-trivial branch or parser 
 
 ## Architecture
 
-Pure core, thin IO shell. Logic lives in pure modules that take and return plain data.
+Pure core, thin IO shell. Logic lives in pure modules under `domain/` that take and return
+plain data (no fs, process, env or clock). All IO lives under `io/`. `main.rs` is wiring.
 
 ```
 src/
-  main.rs      clap commands, anyhow at the boundary
-  error.rs     AppError
-  paths.rs     XDG + TRAIL_HOME resolution                          [pure]
-  config.rs    optional config.toml, defaults when absent
-  discover.rs  walk roots -> repos (git dirs + worktrees)            [IO]
-  reflog.rs    parse reflog line, commit-op filter                   [pure]
-  claude.rs    session JSONL -> session + prompts, cwd -> repo link  [pure]
-  git.rs       git show --numstat for unseen hashes                  [IO]
-  store.rs     rusqlite schema, inserts, queries, FTS5               [IO]
-  view.rs      rebase dedupe, grouping, text and JSON rendering      [pure]
-  range.rs     RANGE argument -> local date span                     [pure]
-  schedule.rs  install / uninstall of the scheduled scan             [IO]
+  main.rs         clap commands, anyhow at the boundary
+  error.rs        AppError
+  domain.rs       pure modules
+  domain/
+    paths.rs      XDG + TRAIL_HOME resolution
+    reflog.rs     parse reflog line, commit-op filter
+    claude.rs     session JSONL -> session + prompts, cwd -> repo link
+    view.rs       rebase dedupe, grouping, text and JSON rendering
+    range.rs      RANGE argument -> local date span
+  io.rs           IO modules
+  io/
+    config.rs     optional config.toml, defaults when absent
+    discover.rs   walk roots -> repos (git dirs + worktrees)
+    git.rs        git show --numstat for unseen hashes
+    store.rs      rusqlite schema, inserts, queries, FTS5
+    schedule.rs   install / uninstall of the scheduled scan
 ```
 
 ### Git access
