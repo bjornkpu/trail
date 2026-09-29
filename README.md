@@ -89,6 +89,9 @@ unless `--no-scan`.
 
 `--prompts` lists each Claude session's prompts under it; `search` always lists the matching ones.
 
+A session shows on each day it has a prompt. Sessions with no typed prompt or answer, such as
+headless `claude -p` runs, are stored but not shown.
+
 Commits are placed on the day of their author date. A rebased or amended commit keeps its author
 date, so it shows once, as its newest version. All versions stay stored.
 

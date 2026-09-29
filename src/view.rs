@@ -81,9 +81,11 @@ impl Item {
     }
 }
 
-/// Commits and sessions in one list by time. Sessions are linked to the longest enclosing
-/// repo in `repos`; `filter` keeps sessions whose linked repo, or cwd when unlinked,
-/// contains it (commits are already filtered by the query).
+/// Commits and sessions in one list by time. Sessions without a listed prompt are dropped:
+/// headless `claude -p` runs have none, and a session whose prompts fall outside the range
+/// shows on the days they do. Sessions are linked to the longest enclosing repo in `repos`;
+/// `filter` keeps sessions whose linked repo, or cwd when unlinked, contains it (commits are
+/// already filtered by the query).
 #[must_use]
 pub fn items(
     commits: Vec<Row>,
@@ -94,6 +96,9 @@ pub fn items(
     let filter = filter.map(str::to_lowercase);
     let mut items: Vec<Item> = commits.into_iter().map(Item::Commit).collect();
     items.extend(sessions.into_iter().filter_map(|row| {
+        if row.prompts.is_empty() {
+            return None;
+        }
         let repo = claude::link(&row.session.cwd, repos).map(str::to_owned);
         let key = repo.as_deref().unwrap_or(&row.session.cwd).to_lowercase();
         filter
@@ -665,14 +670,14 @@ mod tests {
                     "2026-09-25T11:00:00Z",
                     "2026-09-25T11:00:00Z",
                     None,
-                    &[],
+                    &[("2026-09-25T11:00:00Z", Kind::Typed, "a")],
                 ),
                 session_row(
                     "C:/b",
                     "2026-09-25T12:00:00Z",
                     "2026-09-25T12:00:00Z",
                     None,
-                    &[],
+                    &[("2026-09-25T12:00:00Z", Kind::Typed, "b")],
                 ),
             ]
         };
@@ -680,6 +685,18 @@ mod tests {
         assert_eq!(items(Vec::new(), sessions(), &repos, Some("A")).len(), 1);
         assert_eq!(items(Vec::new(), sessions(), &repos, Some("c:/b")).len(), 1);
         assert_eq!(items(Vec::new(), sessions(), &repos, Some("src")).len(), 0);
+    }
+
+    #[test]
+    fn sessions_without_listed_prompts_are_dropped() {
+        let headless = session_row(
+            "C:/a",
+            "2026-09-25T11:00:00Z",
+            "2026-09-25T11:00:00Z",
+            None,
+            &[],
+        );
+        assert!(items(Vec::new(), vec![headless], &[], None).is_empty());
     }
 
     #[test]
