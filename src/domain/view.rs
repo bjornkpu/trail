@@ -5,8 +5,52 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
-use crate::domain::claude::{self, Kind};
-use crate::io::store::{FileStat, RepoSummary, Row, SessionRow};
+use crate::domain::claude::{self, Kind, Prompt, Session};
+
+#[derive(Debug)]
+pub struct Commit {
+    pub hash: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub author_date: Timestamp,
+    pub committer_date: Timestamp,
+    pub subject: String,
+    pub body: String,
+    pub files: Vec<FileStat>,
+}
+
+/// One `git diff-tree --numstat` line. Binary files have no line counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileStat {
+    pub path: String,
+    pub insertions: Option<i64>,
+    pub deletions: Option<i64>,
+}
+
+/// A stored commit with the repo path and the branch it was made on.
+#[derive(Debug)]
+pub struct Row {
+    pub repo: String,
+    /// Branch name without `refs/heads/`, or the ref when no branch log has the commit.
+    pub branch: String,
+    /// How the commit got here: `reflog` (made in this clone) or `backfill`.
+    pub source: String,
+    pub commit: Commit,
+}
+
+/// A stored session with the prompts a query asked for.
+#[derive(Debug)]
+pub struct SessionRow {
+    pub session: Session,
+    pub prompts: Vec<Prompt>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct RepoSummary {
+    pub path: String,
+    pub commits: i64,
+    pub last: Option<Timestamp>,
+}
 
 /// Shows each piece of work once. Rows with the same author date, author email and subject
 /// are versions of one commit: rebased, amended, or the same commit in another clone of the
@@ -353,7 +397,6 @@ pub fn json(items: &[Item], tz: &TimeZone) -> serde_json::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::store::Commit;
 
     fn row(repo: &str, branch: &str, author: &str, committer: &str, subject: &str) -> Row {
         Row {
@@ -480,7 +523,6 @@ mod tests {
     }
 
     use crate::domain::claude::{Kind, Prompt, Session};
-    use crate::io::store::SessionRow;
 
     fn session_row(
         cwd: &str,

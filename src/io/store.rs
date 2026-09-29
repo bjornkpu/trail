@@ -5,6 +5,7 @@ use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::claude::{Kind, Parsed, Prompt, Session};
+use crate::domain::view::{Commit, FileStat, RepoSummary, Row, SessionRow};
 use crate::error::AppError;
 
 const SCHEMA: &str = "
@@ -116,54 +117,9 @@ pub struct Entry {
     pub message: String,
 }
 
-#[derive(Debug)]
-pub struct Commit {
-    pub hash: String,
-    pub author_name: String,
-    pub author_email: String,
-    pub author_date: Timestamp,
-    pub committer_date: Timestamp,
-    pub subject: String,
-    pub body: String,
-    pub files: Vec<FileStat>,
-}
-
-/// One `git diff-tree --numstat` line. Binary files have no line counts.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct FileStat {
-    pub path: String,
-    pub insertions: Option<i64>,
-    pub deletions: Option<i64>,
-}
-
-/// A stored commit with the repo path and the branch it was made on.
-#[derive(Debug)]
-pub struct Row {
-    pub repo: String,
-    /// Branch name without `refs/heads/`, or the ref when no branch log has the commit.
-    pub branch: String,
-    /// How the commit got here: `reflog` (made in this clone) or `backfill`.
-    pub source: String,
-    pub commit: Commit,
-}
-
-/// A stored session with the prompts a query asked for.
-#[derive(Debug)]
-pub struct SessionRow {
-    pub session: Session,
-    pub prompts: Vec<Prompt>,
-}
-
 /// UTC ISO 8601 with second precision, so stored dates sort as text.
 fn iso(ts: Timestamp) -> String {
     ts.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct RepoSummary {
-    pub path: String,
-    pub commits: i64,
-    pub last: Option<Timestamp>,
 }
 
 /// Quotes each word as an FTS5 string, so `-`, `:` and quotes are plain text and all
