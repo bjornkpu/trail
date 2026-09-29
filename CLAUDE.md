@@ -7,7 +7,7 @@ from session transcripts, into SQLite. User-facing behaviour and the reasoning b
 ## Commands
 
 - `cargo nextest run`: tests (use this, not `cargo test`)
-- `cargo clippy --all-targets`: must be clean; lints are `deny`, so this is the compile gate
+- `cargo clippy --all-targets -- -D warnings`: must be clean; lints are `deny`, so this is the compile gate
 - `cargo fmt --check`: formatting
 - `bacon clippy` / `bacon nextest`: watch mode
 - `cargo run -- <args>`: run the CLI; set `TRAIL_HOME` to a temp dir to keep your real DB clean
@@ -24,6 +24,11 @@ Conventional Commits. Subjects describe the change for a user, never a bead id.
 make code compile. No `unwrap`/`expect`/`panic`/`todo`/indexing/`as` casts in non-test code.
 `clippy.toml` allows them in tests. `#[allow(clippy::...)]` needs a one-line comment saying why,
 on one item only. Ask BK before relaxing `arithmetic_side_effects` or `as_conversions`.
+
+`[lints.rust]` sets `unsafe_code = "forbid"`.
+
+The Stop hook in `.claude/settings.json` runs fmt, clippy and nextest at the end of every turn
+and blocks while they are red. `cargo deny check` and `cargo machete` check dependencies.
 
 ## Dependencies
 

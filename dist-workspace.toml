@@ -17,3 +17,7 @@ install-path = "~/.local/bin"
 hosting = "github"
 # Whether to install an updater program
 install-updater = true
+# Build provenance, checkable with `gh attestation verify`.
+github-attestations = true
+# Embeds the dependency tree, so `cargo audit bin` works on released binaries.
+cargo-auditable = true

@@ -7,3 +7,6 @@
 .beads/proxieddb/
 
 .beads/
+
+# Local only: beads and superpowers working files.
+.superpowers/
