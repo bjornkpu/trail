@@ -22,9 +22,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       # Clippy lints are already deny; this also fails on rustc warnings such as dead_code.
-      - run: cargo clippy --all-targets
-        env:
-          RUSTFLAGS: -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -39,3 +37,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run
+
+  deps:
+    name: deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-machete
+      - run: cargo deny check
+      - run: cargo machete
